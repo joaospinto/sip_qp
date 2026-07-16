@@ -1,0 +1,11 @@
+.DS_Store
+bazel-*
+compile_commands.json
+build/
+dist/
+**/*.egg-info/
+**/__pycache__/
+.pytest_cache/
+.venv/
+*.so
+*.pyd

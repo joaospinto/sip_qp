@@ -1,0 +1,17 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+cc_test(
+    name = "sip_qp_test",
+    srcs = [
+        "allocation_counter.cpp",
+        "allocation_counter.hpp",
+        "sip_qp_test.cpp",
+    ],
+    deps = [
+        "//sip_qp",
+        "@googletest//:gtest_main",
+        "@sip//sip",
+        "@sip_qdldl//sip_qdldl",
+    ],
+    linkstatic = True,
+)

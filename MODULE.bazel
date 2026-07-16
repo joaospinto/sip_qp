@@ -1,0 +1,42 @@
+module(
+    name = "sip_qp",
+    version = "0.0.1",
+)
+
+bazel_dep(name = "sip")
+git_override(
+    module_name = "sip",
+    commit = "d386ed883230935eff8cb116f2d70c820aefc0bd",
+    remote = "https://github.com/joaospinto/sip.git",
+)
+
+bazel_dep(name = "sip_qdldl")
+git_override(
+    module_name = "sip_qdldl",
+    commit = "ee2beb662b8f1711dc2edc0323d74bc2eed0547a",
+    remote = "https://github.com/joaospinto/sip_qdldl.git",
+)
+
+bazel_dep(name = "rules_cc", version = "0.2.17")
+
+bazel_dep(name = "googletest", version = "1.17.0.bcr.2", dev_dependency = True)
+
+bazel_dep(name = "qdldl", version = "0.1.7")
+
+bazel_dep(name = "eigen", version = "3.4.0.bcr.3", dev_dependency = True)
+bazel_dep(name = "nanobind_bazel", version = "2.6.1", dev_dependency = True)
+bazel_dep(name = "rules_python", version = "1.5.1", dev_dependency = True)
+
+python = use_extension(
+    "@rules_python//python/extensions:python.bzl",
+    "python",
+    dev_dependency = True,
+)
+python.toolchain(python_version = "3.10")
+python.toolchain(python_version = "3.11")
+python.toolchain(python_version = "3.12")
+python.toolchain(
+    is_default = True,
+    python_version = "3.13",
+)
+use_repo(python, python = "python_versions")

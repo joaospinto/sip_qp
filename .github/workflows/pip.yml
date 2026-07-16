@@ -1,0 +1,53 @@
+name: Pip Install and Test
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build with Pip
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04, windows-2025]
+        python-version: ["3.13"]
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-python@v6
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - uses: bazel-contrib/setup-bazel@0.19.0
+      with:
+        bazelisk-cache: true
+        disk-cache: ${{ github.workflow }}
+        repository-cache: true
+
+    - name: Set min macOS version
+      if: runner.os == 'macOS'
+      run: echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> $GITHUB_ENV
+
+    - name: Install python3-dev on Ubuntu
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install python3-dev
+
+    - name: Test C++ API
+      run: bazel test //tests:all --test_output=errors
+
+    - name: Build and install Python API
+      run: |
+        python -m pip install --upgrade pip uv
+        python -m pip install pytest
+        pip install --verbose .
+
+    - name: Test Python API
+      run: python -m pytest

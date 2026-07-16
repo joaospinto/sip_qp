@@ -1,0 +1,8 @@
+include .bazelrc
+include .bazelversion
+include LICENSE
+include MODULE.bazel
+include MODULE.bazel.lock
+include README.md
+recursive-include sip_qp *.bazel *.cpp *.hpp
+recursive-include src *.bazel *.cpp *.py

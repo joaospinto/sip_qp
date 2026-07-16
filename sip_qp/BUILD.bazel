@@ -1,0 +1,33 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "types",
+    srcs = ["types.cpp"],
+    hdrs = ["types.hpp"],
+    deps = [
+        "@sip//sip",
+        "@sip_qdldl//sip_qdldl",
+    ],
+    linkstatic = True,
+)
+
+cc_library(
+    name = "sip_qp",
+    srcs = [
+        "ordering.cpp",
+        "sip_qp.cpp",
+    ],
+    hdrs = [
+        "ordering.hpp",
+        "sip_qp.hpp",
+    ],
+    deps = [
+        ":types",
+        "@qdldl",
+        "@sip//sip",
+        "@sip_qdldl//sip_qdldl",
+    ],
+    linkstatic = True,
+)
