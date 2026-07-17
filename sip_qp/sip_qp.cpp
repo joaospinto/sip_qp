@@ -207,8 +207,23 @@ void evaluate_model(const Data &data, Workspace &workspace, const double *x) {
   const int x_dim = data.num_primal_variables();
 
   std::copy_n(workspace.scaled_linear_objective, x_dim, model.gradient_f);
-  sip_qdldl::add_Ax_to_y_where_A_upper_symmetric(model.upper_hessian_lagrangian,
-                                                 x, model.gradient_f);
+  std::fill_n(workspace.scaling_norms, x_dim, 0.0);
+  const auto &hessian = model.upper_hessian_lagrangian;
+  for (int column = 0; column < x_dim; ++column) {
+    for (int index = hessian.indptr[column]; index < hessian.indptr[column + 1];
+         ++index) {
+      const int row = hessian.ind[index];
+      add_compensated(hessian.data[index] * x[column], model.gradient_f[row],
+                      workspace.scaling_norms[row]);
+      if (row != column) {
+        add_compensated(hessian.data[index] * x[row], model.gradient_f[column],
+                        workspace.scaling_norms[column]);
+      }
+    }
+  }
+  for (int variable = 0; variable < x_dim; ++variable) {
+    model.gradient_f[variable] += workspace.scaling_norms[variable];
+  }
 
   double objective = data.objective_constant;
   double correction = 0.0;
