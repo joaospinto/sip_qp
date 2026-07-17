@@ -260,8 +260,8 @@ auto initialize_variables(const Input &input, const Settings &settings,
 
   evaluate_model(data, workspace, variables.x);
 
-  const bool initialize_explicit_constraints = y_dim + s_dim > 0;
-  if (initialize_explicit_constraints) {
+  const bool initialize_equalities = y_dim > 0;
+  if (initialize_equalities) {
     auto &linear_system = workspace.sip.csd_workspace;
     double *w = linear_system.w;
     double *r1 = linear_system.r1;
@@ -275,9 +275,9 @@ auto initialize_variables(const Input &input, const Settings &settings,
 
     const double initial_penalty =
         settings.sip.penalty.initial_penalty_parameter;
-    std::fill_n(w, s_dim, 1.0);
+    std::fill_n(w, s_dim, 0.0);
     std::fill_n(r2, y_dim, 1.0 / initial_penalty);
-    std::fill_n(r3, s_dim, 1.0 / initial_penalty);
+    std::fill_n(r3, s_dim, initial_penalty);
 
     std::fill_n(rhs_y, y_dim, 0.0);
     callback_provider.add_Cx_to_y(variables.x, rhs_y);
@@ -287,9 +287,6 @@ auto initialize_variables(const Input &input, const Settings &settings,
 
     std::fill_n(rhs_z, s_dim, 0.0);
     callback_provider.add_Gx_to_y(variables.x, rhs_z);
-    for (int inequality = 0; inequality < s_dim; ++inequality) {
-      rhs_z[inequality] -= workspace.scaled_model.g[inequality];
-    }
 
     double primal_regularization =
         std::max(settings.sip.regularization.initial,
@@ -324,44 +321,15 @@ auto initialize_variables(const Input &input, const Settings &settings,
     callback_provider.solve(rhs, solution);
     std::copy_n(solution, x_dim, variables.x);
     std::copy_n(solution + x_dim, y_dim, variables.y);
-    std::copy_n(solution + x_dim + y_dim, s_dim, variables.z);
     evaluate_model(data, workspace, variables.x);
   }
 
   const double initial_mu = settings.sip.barrier.initial_mu;
   const double slack_floor = std::max(initial_mu, 1e-8);
-  if (initialize_explicit_constraints && s_dim > 0) {
-    double slack_shift = 0.0;
-    double dual_shift = 0.0;
-    for (int inequality = 0; inequality < s_dim; ++inequality) {
-      variables.s[inequality] = -variables.z[inequality];
-      slack_shift = std::max(slack_shift, -variables.s[inequality]);
-      dual_shift = std::max(dual_shift, -variables.z[inequality]);
-    }
-
-    double complementarity_sum = 0.0;
-    for (int inequality = 0; inequality < s_dim; ++inequality) {
-      complementarity_sum += (variables.s[inequality] + slack_shift) *
-                             (variables.z[inequality] + dual_shift);
-    }
-    const double target_complementarity =
-        std::max(complementarity_sum / s_dim, 1e-10);
-    for (int inequality = 0; inequality < s_dim; ++inequality) {
-      const double difference = variables.z[inequality];
-      const double root =
-          std::hypot(difference, 2.0 * std::sqrt(target_complementarity));
-      variables.z[inequality] =
-          difference >= 0.0
-              ? 0.5 * (difference + root)
-              : 2.0 * target_complementarity / (root - difference);
-      variables.s[inequality] = variables.z[inequality] - difference;
-    }
-  } else {
-    for (int inequality = 0; inequality < s_dim; ++inequality) {
-      variables.s[inequality] =
-          std::max(std::abs(workspace.scaled_model.g[inequality]), slack_floor);
-      variables.z[inequality] = initial_mu / variables.s[inequality];
-    }
+  for (int inequality = 0; inequality < s_dim; ++inequality) {
+    variables.s[inequality] =
+        std::max(std::abs(workspace.scaled_model.g[inequality]), slack_floor);
+    variables.z[inequality] = initial_mu / variables.s[inequality];
   }
 
   int side = 0;
