@@ -91,8 +91,8 @@ Settings::Settings()
               },
           .termination =
               {
-                  .max_dual_residual = 1e-6,
-                  .max_constraint_violation = 1e-6,
+                  .max_dual_residual = 1e-8,
+                  .max_constraint_violation = 1e-8,
                   .max_complementarity_gap = 1e-6,
                   .max_merit_slope = 1e-24,
               },
@@ -120,7 +120,7 @@ Settings::Settings()
                   .print_derivative_check_logs = false,
               },
       },
-      scaling{} {}
+      scaling{}, termination{} {}
 
 auto default_settings() -> Settings { return Settings{}; }
 

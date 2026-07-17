@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sip_qp_python"
-version = "0.0.1"
+version = "0.0.2"
 description = "Python bindings for the SIP quadratic-programming front-end."
 readme = "README.md"
 license = "MIT"

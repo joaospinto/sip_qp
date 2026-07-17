@@ -3,7 +3,60 @@ from typing import Optional, Union
 import numpy as np
 import scipy.sparse as spa
 
-from .sip_qp_python_ext import *
+from .sip_qp_python_ext import (
+    FAILED_CHECK,
+    FACTORIZATION_FAILURE,
+    ITERATION_LIMIT,
+    LINE_SEARCH_FAILURE,
+    LINE_SEARCH_ITERATION_LIMIT,
+    LOCALLY_INFEASIBLE,
+    SOLVED,
+    SUBOPTIMAL,
+    TIMEOUT,
+    BarrierSettings,
+    LineSearchSettings,
+    LoggingSettings,
+    Mode,
+    PenaltySettings,
+    RegularizationSettings,
+    Result,
+    ScalingSettings,
+    Settings,
+    SipSettings,
+    SipTerminationSettings,
+    Solver,
+    SolverInfo,
+    Status,
+    TerminationSettings,
+)
+
+__all__ = [
+    "FAILED_CHECK",
+    "FACTORIZATION_FAILURE",
+    "ITERATION_LIMIT",
+    "LINE_SEARCH_FAILURE",
+    "LINE_SEARCH_ITERATION_LIMIT",
+    "LOCALLY_INFEASIBLE",
+    "SOLVED",
+    "SUBOPTIMAL",
+    "TIMEOUT",
+    "BarrierSettings",
+    "LineSearchSettings",
+    "LoggingSettings",
+    "Mode",
+    "PenaltySettings",
+    "RegularizationSettings",
+    "Result",
+    "ScalingSettings",
+    "Settings",
+    "SipSettings",
+    "SipTerminationSettings",
+    "Solver",
+    "SolverInfo",
+    "Status",
+    "TerminationSettings",
+    "solve_qp",
+]
 
 
 def solve_qp(
@@ -26,16 +79,8 @@ def solve_qp(
         raise ValueError("q must be a vector")
     n = q.shape[0]
     P = spa.csc_matrix(P, dtype=np.float64)
-    G = (
-        spa.csr_matrix((0, n))
-        if G is None
-        else spa.csr_matrix(G, dtype=np.float64)
-    )
-    A = (
-        spa.csr_matrix((0, n))
-        if A is None
-        else spa.csr_matrix(A, dtype=np.float64)
-    )
+    G = spa.csr_matrix((0, n)) if G is None else spa.csr_matrix(G, dtype=np.float64)
+    A = spa.csr_matrix((0, n)) if A is None else spa.csr_matrix(A, dtype=np.float64)
     if P.shape != (n, n) or G.shape[1] != n or A.shape[1] != n:
         raise ValueError("inconsistent QP matrix dimensions")
 

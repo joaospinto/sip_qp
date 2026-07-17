@@ -293,19 +293,13 @@ NB_MODULE(sip_qp_python_ext, module) {
       .def_rw("max_penalty_parameter",
               &sip::PenaltySettings::max_penalty_parameter);
 
-  nb::class_<sip::TerminationSettings>(module, "TerminationSettings")
+  nb::class_<sip::TerminationSettings>(module, "SipTerminationSettings")
       .def(nb::init<>())
       .def_rw("max_dual_residual", &sip::TerminationSettings::max_dual_residual)
       .def_rw("max_constraint_violation",
               &sip::TerminationSettings::max_constraint_violation)
       .def_rw("max_complementarity_gap",
               &sip::TerminationSettings::max_complementarity_gap)
-      .def_rw("max_duality_gap", &sip::TerminationSettings::max_duality_gap)
-      .def_rw("enable_cost_change_termination",
-              &sip::TerminationSettings::enable_cost_change_termination)
-      .def_rw("max_cost_change", &sip::TerminationSettings::max_cost_change)
-      .def_rw("max_relative_cost_change",
-              &sip::TerminationSettings::max_relative_cost_change)
       .def_rw("max_suboptimal_constraint_violation",
               &sip::TerminationSettings::max_suboptimal_constraint_violation)
       .def_rw("max_merit_slope", &sip::TerminationSettings::max_merit_slope)
@@ -371,10 +365,22 @@ NB_MODULE(sip_qp_python_ext, module) {
       .def_rw("convergence_tolerance",
               &sip::qp::ScalingSettings::convergence_tolerance);
 
+  nb::class_<sip::qp::TerminationSettings>(module, "TerminationSettings")
+      .def(nb::init<>())
+      .def_rw("max_absolute_residual",
+              &sip::qp::TerminationSettings::max_absolute_residual)
+      .def_rw("max_relative_residual",
+              &sip::qp::TerminationSettings::max_relative_residual)
+      .def_rw("max_absolute_duality_gap",
+              &sip::qp::TerminationSettings::max_absolute_duality_gap)
+      .def_rw("max_relative_duality_gap",
+              &sip::qp::TerminationSettings::max_relative_duality_gap);
+
   nb::class_<sip::qp::Settings>(module, "Settings")
       .def(nb::init<>())
       .def_rw("sip", &sip::qp::Settings::sip)
-      .def_rw("scaling", &sip::qp::Settings::scaling);
+      .def_rw("scaling", &sip::qp::Settings::scaling)
+      .def_rw("termination", &sip::qp::Settings::termination);
 
   nb::class_<sip::Output>(module, "SolverInfo")
       .def_ro("exit_status", &sip::Output::exit_status)

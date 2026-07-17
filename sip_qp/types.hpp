@@ -45,11 +45,19 @@ struct ScalingSettings {
   double convergence_tolerance = 1e-3;
 };
 
+struct TerminationSettings {
+  double max_absolute_residual = 1e-8;
+  double max_relative_residual = 1e-9;
+  double max_absolute_duality_gap = 1e-8;
+  double max_relative_duality_gap = 1e-9;
+};
+
 struct Settings {
   Settings();
 
   ::sip::Settings sip;
   ScalingSettings scaling;
+  TerminationSettings termination;
 };
 
 auto default_settings() -> Settings;

@@ -226,6 +226,157 @@ void evaluate_model(const Data &data, Workspace &workspace, const double *x) {
                        workspace.inequality_scaling, x, model.g);
 }
 
+auto optimality_satisfied(const ::sip::TerminationCallbackInput &iterate,
+                          const Settings &settings, const Data &data,
+                          const Workspace &workspace) -> bool {
+  const int x_dim = data.num_primal_variables();
+  const int y_dim = data.num_equalities();
+  const int s_dim = data.num_inequalities();
+
+  double primal_scale = 0.0;
+  for (int equality = 0; equality < y_dim; ++equality) {
+    const double scaling = workspace.equality_scaling[equality];
+    const double offset = data.equality_offsets[equality];
+    const double affine_term =
+        iterate.equality_residual[equality] / scaling - offset;
+    primal_scale =
+        std::max({primal_scale, std::abs(affine_term), std::abs(offset)});
+  }
+  for (int inequality = 0; inequality < s_dim; ++inequality) {
+    const double scaling = workspace.inequality_scaling[inequality];
+    const double offset = data.inequality_offsets[inequality];
+    const double affine_term =
+        (iterate.inequality_residual[inequality] - iterate.s[inequality]) /
+            scaling -
+        offset;
+    const double slack = iterate.s[inequality] / scaling;
+    primal_scale = std::max({primal_scale, std::abs(affine_term),
+                             std::abs(offset), std::abs(slack)});
+  }
+
+  int side = 0;
+  for (int variable = 0; variable < x_dim; ++variable) {
+    const double primal =
+        workspace.primal_scaling[variable] * iterate.x[variable];
+    const double slack_scaling = workspace.variable_bound_scaling[variable];
+    if (std::isfinite(data.lower_bounds[variable])) {
+      const double slack = iterate.bound_s[side] / slack_scaling;
+      primal_scale =
+          std::max({primal_scale, std::abs(primal),
+                    std::abs(data.lower_bounds[variable]), std::abs(slack)});
+      ++side;
+    }
+    if (std::isfinite(data.upper_bounds[variable])) {
+      const double slack = iterate.bound_s[side] / slack_scaling;
+      primal_scale =
+          std::max({primal_scale, std::abs(primal),
+                    std::abs(data.upper_bounds[variable]), std::abs(slack)});
+      ++side;
+    }
+  }
+
+  double dual_scale = 0.0;
+  for (int variable = 0; variable < x_dim; ++variable) {
+    const double scaling = workspace.primal_scaling[variable];
+    const double linear_objective = workspace.scaled_linear_objective[variable];
+    const double hessian_product =
+        iterate.objective_gradient[variable] - linear_objective;
+    const double constraint_dual =
+        iterate.dual_residual[variable] - iterate.objective_gradient[variable];
+    dual_scale = std::max({dual_scale, std::abs(hessian_product / scaling),
+                           std::abs(linear_objective / scaling),
+                           std::abs(constraint_dual / scaling)});
+  }
+
+  const double primal_residual_relative =
+      iterate.max_primal_violation / std::max(1.0, primal_scale);
+  const double dual_residual_relative =
+      iterate.max_dual_violation / std::max(1.0, dual_scale);
+  const bool primal_satisfied =
+      iterate.max_primal_violation <
+          settings.termination.max_absolute_residual ||
+      primal_residual_relative < settings.termination.max_relative_residual;
+  const bool dual_satisfied =
+      iterate.max_dual_violation < settings.termination.max_absolute_residual ||
+      dual_residual_relative < settings.termination.max_relative_residual;
+  if (!primal_satisfied || !dual_satisfied) {
+    return false;
+  }
+
+  double hessian_term = 0.0;
+  double hessian_correction = 0.0;
+  double linear_term = 0.0;
+  double linear_correction = 0.0;
+  for (int variable = 0; variable < x_dim; ++variable) {
+    const double linear_objective = workspace.scaled_linear_objective[variable];
+    add_compensated(
+        iterate.x[variable] *
+            (iterate.objective_gradient[variable] - linear_objective),
+        hessian_term, hessian_correction);
+    add_compensated(iterate.x[variable] * linear_objective, linear_term,
+                    linear_correction);
+  }
+  hessian_term += hessian_correction;
+  linear_term += linear_correction;
+
+  double equality_term = 0.0;
+  double equality_correction = 0.0;
+  for (int equality = 0; equality < y_dim; ++equality) {
+    add_compensated(data.equality_offsets[equality] *
+                        workspace.equality_scaling[equality] *
+                        iterate.y[equality],
+                    equality_term, equality_correction);
+  }
+  equality_term += equality_correction;
+
+  double inequality_term = 0.0;
+  double inequality_correction = 0.0;
+  for (int inequality = 0; inequality < s_dim; ++inequality) {
+    add_compensated(data.inequality_offsets[inequality] *
+                        workspace.inequality_scaling[inequality] *
+                        iterate.z[inequality],
+                    inequality_term, inequality_correction);
+  }
+  inequality_term += inequality_correction;
+
+  double lower_bound_term = 0.0;
+  double lower_bound_correction = 0.0;
+  double upper_bound_term = 0.0;
+  double upper_bound_correction = 0.0;
+  side = 0;
+  for (int variable = 0; variable < x_dim; ++variable) {
+    if (std::isfinite(data.lower_bounds[variable])) {
+      add_compensated(workspace.scaled_lower_bounds[variable] *
+                          iterate.bound_z[side],
+                      lower_bound_term, lower_bound_correction);
+      ++side;
+    }
+    if (std::isfinite(data.upper_bounds[variable])) {
+      add_compensated(-workspace.scaled_upper_bounds[variable] *
+                          iterate.bound_z[side],
+                      upper_bound_term, upper_bound_correction);
+      ++side;
+    }
+  }
+  lower_bound_term += lower_bound_correction;
+  upper_bound_term += upper_bound_correction;
+
+  const double gap = hessian_term + linear_term - equality_term -
+                     inequality_term - lower_bound_term - upper_bound_term;
+  const double gap_scale =
+      std::max({1.0, std::abs(hessian_term), std::abs(linear_term),
+                std::abs(equality_term), std::abs(inequality_term),
+                std::abs(lower_bound_term), std::abs(upper_bound_term)});
+  if (!std::isfinite(gap) || !std::isfinite(gap_scale)) {
+    return false;
+  }
+
+  const double absolute_gap = std::abs(gap);
+  const double relative_gap = absolute_gap / gap_scale;
+  return absolute_gap < settings.termination.max_absolute_duality_gap ||
+         relative_gap < settings.termination.max_relative_duality_gap;
+}
+
 void initialize_variables(const Input &input, const Settings &settings,
                           Workspace &workspace) {
   const Data &data = input.data;
@@ -372,6 +523,11 @@ auto solve(const Input &input, const Settings &settings, Workspace &workspace)
           evaluate_model(data, workspace, callback.x);
         }
       };
+  const auto termination_callback =
+      [&data, &settings,
+       &workspace](const ::sip::TerminationCallbackInput &iterate) {
+        return optimality_satisfied(iterate, settings, data, workspace);
+      };
 
   const ::sip::Input sip_input{
       .factor = std::cref(factor),
@@ -387,6 +543,7 @@ auto solve(const Input &input, const Settings &settings, Workspace &workspace)
       .get_c = std::cref(get_equalities),
       .get_g = std::cref(get_inequalities),
       .model_callback = std::cref(model_callback),
+      .termination_callback = std::cref(termination_callback),
       .timeout_callback = std::cref(input.timeout_callback),
       .lower_bounds = workspace.scaled_lower_bounds,
       .upper_bounds = workspace.scaled_upper_bounds,
@@ -405,8 +562,16 @@ auto solve(const Input &input, const Settings &settings, Workspace &workspace)
           },
   };
 
+  ::sip::Settings sip_settings = settings.sip;
+  sip_settings.termination.max_constraint_violation =
+      settings.termination.max_absolute_residual;
+  sip_settings.termination.max_dual_residual =
+      settings.termination.max_absolute_residual;
+  sip_settings.termination.max_complementarity_gap =
+      std::min(sip_settings.termination.max_complementarity_gap,
+               settings.termination.max_absolute_duality_gap);
   const ::sip::Output sip_output =
-      ::sip::solve(sip_input, settings.sip, workspace.sip);
+      ::sip::solve(sip_input, sip_settings, workspace.sip);
   recover_solution(data, workspace);
 
   return Output{
