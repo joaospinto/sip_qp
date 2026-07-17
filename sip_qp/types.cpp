@@ -75,9 +75,10 @@ Settings::Settings()
     : sip{
           .mode = ::sip::Mode::REGULARIZED_IPM,
           .max_iterations = 1000,
-          .num_iterative_refinement_steps = 0,
+          .num_iterative_refinement_steps = 2,
           .barrier =
               {
+                  .use_predictor_corrector = true,
                   .initial_mu = 1e-2,
                   .mu_update_factor = 0.2,
                   .mu_min = 1e-16,
@@ -85,7 +86,7 @@ Settings::Settings()
               },
           .penalty =
               {
-                  .initial_penalty_parameter = 1.0,
+                  .initial_penalty_parameter = 1e4,
                   .penalty_parameter_increase_factor = 1.35,
                   .max_penalty_parameter = 1e9,
               },
@@ -108,8 +109,8 @@ Settings::Settings()
           .line_search =
               {
                   .max_iterations = 5000,
-                  .tau = 0.995,
-                  .skip_line_search = false,
+                  .tau = 0.99,
+                  .skip_line_search = true,
                   .enable_line_search_failures = false,
               },
           .logging =
