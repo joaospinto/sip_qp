@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 
 namespace sip::qp {
 namespace {
@@ -241,8 +242,10 @@ void evaluate_model(const Data &data, Workspace &workspace, const double *x) {
                        workspace.inequality_scaling, x, model.g);
 }
 
-void initialize_variables(const Input &input, const Settings &settings,
-                          Workspace &workspace) {
+auto initialize_variables(const Input &input, const Settings &settings,
+                          Workspace &workspace,
+                          sip_qdldl::CallbackProvider &callback_provider)
+    -> bool {
   const Data &data = input.data;
   const int x_dim = data.num_primal_variables();
   const int y_dim = data.num_equalities();
@@ -257,12 +260,108 @@ void initialize_variables(const Input &input, const Settings &settings,
 
   evaluate_model(data, workspace, variables.x);
 
+  const bool initialize_explicit_constraints = y_dim + s_dim > 0;
+  if (initialize_explicit_constraints) {
+    auto &linear_system = workspace.sip.csd_workspace;
+    double *w = linear_system.w;
+    double *r1 = linear_system.r1;
+    double *r2 = linear_system.r2;
+    double *r3 = linear_system.r3;
+    double *rhs = linear_system.rhs_block_3x3;
+    double *solution = linear_system.sol_block_3x3;
+    double *rhs_x = rhs;
+    double *rhs_y = rhs_x + x_dim;
+    double *rhs_z = rhs_y + y_dim;
+
+    const double initial_penalty =
+        settings.sip.penalty.initial_penalty_parameter;
+    std::fill_n(w, s_dim, 1.0);
+    std::fill_n(r2, y_dim, 1.0 / initial_penalty);
+    std::fill_n(r3, s_dim, 1.0 / initial_penalty);
+
+    std::fill_n(rhs_y, y_dim, 0.0);
+    callback_provider.add_Cx_to_y(variables.x, rhs_y);
+    for (int equality = 0; equality < y_dim; ++equality) {
+      rhs_y[equality] -= workspace.scaled_model.c[equality];
+    }
+
+    std::fill_n(rhs_z, s_dim, 0.0);
+    callback_provider.add_Gx_to_y(variables.x, rhs_z);
+    for (int inequality = 0; inequality < s_dim; ++inequality) {
+      rhs_z[inequality] -= workspace.scaled_model.g[inequality];
+    }
+
+    double primal_regularization =
+        std::max(settings.sip.regularization.initial,
+                 settings.sip.regularization.first_positive);
+    bool factorization_ok = false;
+    for (int attempt = 0; attempt < settings.sip.regularization.max_attempts;
+         ++attempt) {
+      std::fill_n(r1, x_dim, primal_regularization);
+      for (int variable = 0; variable < x_dim; ++variable) {
+        rhs_x[variable] = -workspace.scaled_linear_objective[variable] +
+                          primal_regularization * variables.x[variable];
+      }
+      factorization_ok = callback_provider.factor(w, r1, r2, r3);
+      if (factorization_ok) {
+        break;
+      }
+      const double next_regularization =
+          primal_regularization < settings.sip.regularization.first_positive
+              ? settings.sip.regularization.first_positive
+              : std::min(primal_regularization *
+                             settings.sip.regularization.increase_factor,
+                         settings.sip.regularization.maximum);
+      if (next_regularization <= primal_regularization) {
+        break;
+      }
+      primal_regularization = next_regularization;
+    }
+    if (!factorization_ok) {
+      return false;
+    }
+
+    callback_provider.solve(rhs, solution);
+    std::copy_n(solution, x_dim, variables.x);
+    std::copy_n(solution + x_dim, y_dim, variables.y);
+    std::copy_n(solution + x_dim + y_dim, s_dim, variables.z);
+    evaluate_model(data, workspace, variables.x);
+  }
+
   const double initial_mu = settings.sip.barrier.initial_mu;
   const double slack_floor = std::max(initial_mu, 1e-8);
-  for (int inequality = 0; inequality < s_dim; ++inequality) {
-    variables.s[inequality] =
-        std::max(std::abs(workspace.scaled_model.g[inequality]), slack_floor);
-    variables.z[inequality] = initial_mu / variables.s[inequality];
+  if (initialize_explicit_constraints && s_dim > 0) {
+    double slack_shift = 0.0;
+    double dual_shift = 0.0;
+    for (int inequality = 0; inequality < s_dim; ++inequality) {
+      variables.s[inequality] = -variables.z[inequality];
+      slack_shift = std::max(slack_shift, -variables.s[inequality]);
+      dual_shift = std::max(dual_shift, -variables.z[inequality]);
+    }
+
+    double complementarity_sum = 0.0;
+    for (int inequality = 0; inequality < s_dim; ++inequality) {
+      complementarity_sum += (variables.s[inequality] + slack_shift) *
+                             (variables.z[inequality] + dual_shift);
+    }
+    const double target_complementarity =
+        std::max(complementarity_sum / s_dim, 1e-10);
+    for (int inequality = 0; inequality < s_dim; ++inequality) {
+      const double difference = variables.z[inequality];
+      const double root =
+          std::hypot(difference, 2.0 * std::sqrt(target_complementarity));
+      variables.z[inequality] =
+          difference >= 0.0
+              ? 0.5 * (difference + root)
+              : 2.0 * target_complementarity / (root - difference);
+      variables.s[inequality] = variables.z[inequality] - difference;
+    }
+  } else {
+    for (int inequality = 0; inequality < s_dim; ++inequality) {
+      variables.s[inequality] =
+          std::max(std::abs(workspace.scaled_model.g[inequality]), slack_floor);
+      variables.z[inequality] = initial_mu / variables.s[inequality];
+    }
   }
 
   int side = 0;
@@ -284,6 +383,7 @@ void initialize_variables(const Input &input, const Settings &settings,
       ++side;
     }
   }
+  return true;
 }
 
 void recover_solution(const Data &data, Workspace &workspace) {
@@ -326,7 +426,6 @@ auto solve(const Input &input, const Settings &settings, Workspace &workspace)
   copy_model(data, workspace);
   compute_scaling(input, settings, workspace);
   apply_scaling(input, workspace);
-  initialize_variables(input, settings, workspace);
 
   const sip_qdldl::Settings qdldl_settings{
       .permute_kkt_system = true,
@@ -334,6 +433,25 @@ auto solve(const Input &input, const Settings &settings, Workspace &workspace)
   };
   sip_qdldl::CallbackProvider callback_provider(
       qdldl_settings, workspace.scaled_model, workspace.qdldl);
+
+  if (!initialize_variables(input, settings, workspace, callback_provider)) {
+    return Output{
+        .sip =
+            {
+                .exit_status = ::sip::Status::FACTORIZATION_FAILURE,
+                .num_iterations = 0,
+                .num_ls_iterations = 0,
+                .max_primal_violation =
+                    std::numeric_limits<double>::signaling_NaN(),
+                .max_dual_violation =
+                    std::numeric_limits<double>::signaling_NaN(),
+            },
+        .primal = workspace.primal_solution,
+        .equality_dual = workspace.equality_dual_solution,
+        .inequality_dual = workspace.inequality_dual_solution,
+        .variable_bound_dual = workspace.variable_bound_dual_solution,
+    };
+  }
 
   const auto factor = [&callback_provider](const double *w, const double *r1,
                                            const double *r2,
