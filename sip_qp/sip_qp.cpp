@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
-#include <limits>
 
 namespace sip::qp {
 namespace {
@@ -227,10 +226,8 @@ void evaluate_model(const Data &data, Workspace &workspace, const double *x) {
                        workspace.inequality_scaling, x, model.g);
 }
 
-auto initialize_variables(const Input &input, const Settings &settings,
-                          Workspace &workspace,
-                          sip_qdldl::CallbackProvider &callback_provider)
-    -> bool {
+void initialize_variables(const Input &input, const Settings &settings,
+                          Workspace &workspace) {
   const Data &data = input.data;
   const int x_dim = data.num_primal_variables();
   const int y_dim = data.num_equalities();
@@ -241,173 +238,37 @@ auto initialize_variables(const Input &input, const Settings &settings,
     variables.x[variable] =
         input.initial_primal[variable] / workspace.primal_scaling[variable];
   }
+  std::fill_n(variables.y, y_dim, 0.0);
+
   evaluate_model(data, workspace, variables.x);
 
-  auto &linear_system = workspace.sip.csd_workspace;
-  double *w = linear_system.w;
-  double *r1 = linear_system.r1;
-  double *r2 = linear_system.r2;
-  double *r3 = linear_system.r3;
-  double *rhs = linear_system.rhs_block_3x3;
-  double *solution = linear_system.sol_block_3x3;
-  double *rhs_x = rhs;
-  double *rhs_y = rhs_x + x_dim;
-  double *rhs_z = rhs_y + y_dim;
-
-  const double dual_regularization =
-      1.0 / settings.sip.penalty.initial_penalty_parameter;
-  std::fill_n(w, s_dim, 1.0);
-  std::fill_n(r1, x_dim, 0.0);
-  std::fill_n(r2, y_dim, dual_regularization);
-  std::fill_n(r3, s_dim, dual_regularization);
-
-  std::fill_n(rhs_x, x_dim, 0.0);
-  callback_provider.add_Hx_to_y(variables.x, rhs_x);
-  for (int variable = 0; variable < x_dim; ++variable) {
-    rhs_x[variable] -= workspace.scaled_model.gradient_f[variable];
-  }
-
-  std::fill_n(rhs_y, y_dim, 0.0);
-  callback_provider.add_Cx_to_y(variables.x, rhs_y);
-  for (int equality = 0; equality < y_dim; ++equality) {
-    rhs_y[equality] -= workspace.scaled_model.c[equality];
-  }
-
-  std::fill_n(rhs_z, s_dim, 0.0);
-  callback_provider.add_Gx_to_y(variables.x, rhs_z);
+  const double initial_mu = settings.sip.barrier.initial_mu;
+  const double slack_floor = std::max(initial_mu, 1e-8);
   for (int inequality = 0; inequality < s_dim; ++inequality) {
-    rhs_z[inequality] -= workspace.scaled_model.g[inequality];
+    variables.s[inequality] =
+        std::max(std::abs(workspace.scaled_model.g[inequality]), slack_floor);
+    variables.z[inequality] = initial_mu / variables.s[inequality];
   }
 
   int side = 0;
   for (int variable = 0; variable < x_dim; ++variable) {
     if (std::isfinite(workspace.scaled_lower_bounds[variable])) {
-      constexpr double jacobian = -1.0;
-      const double bound_rhs =
-          jacobian * workspace.scaled_lower_bounds[variable];
-      r1[variable] += 1.0 / (1.0 + dual_regularization);
-      rhs_x[variable] += jacobian * bound_rhs / (1.0 + dual_regularization);
-      workspace.sip.nrhs.bound_z[side] = bound_rhs;
+      const double constraint_value =
+          workspace.scaled_lower_bounds[variable] - variables.x[variable];
+      variables.bound_s[side] =
+          std::max(std::abs(constraint_value), slack_floor);
+      variables.bound_z[side] = initial_mu / variables.bound_s[side];
       ++side;
     }
     if (std::isfinite(workspace.scaled_upper_bounds[variable])) {
-      constexpr double jacobian = 1.0;
-      const double bound_rhs =
-          jacobian * workspace.scaled_upper_bounds[variable];
-      r1[variable] += 1.0 / (1.0 + dual_regularization);
-      rhs_x[variable] += jacobian * bound_rhs / (1.0 + dual_regularization);
-      workspace.sip.nrhs.bound_z[side] = bound_rhs;
+      const double constraint_value =
+          variables.x[variable] - workspace.scaled_upper_bounds[variable];
+      variables.bound_s[side] =
+          std::max(std::abs(constraint_value), slack_floor);
+      variables.bound_z[side] = initial_mu / variables.bound_s[side];
       ++side;
     }
   }
-
-  double primal_regularization =
-      std::max(settings.sip.regularization.initial,
-               settings.sip.regularization.first_positive);
-  bool factorization_ok = false;
-  for (int attempt = 0; attempt < settings.sip.regularization.max_attempts;
-       ++attempt) {
-    for (int variable = 0; variable < x_dim; ++variable) {
-      r1[variable] += primal_regularization;
-      rhs_x[variable] += primal_regularization * variables.x[variable];
-    }
-    factorization_ok = callback_provider.factor(w, r1, r2, r3);
-    for (int variable = 0; variable < x_dim; ++variable) {
-      r1[variable] -= primal_regularization;
-      rhs_x[variable] -= primal_regularization * variables.x[variable];
-    }
-    if (factorization_ok) {
-      break;
-    }
-    const double next_regularization =
-        primal_regularization < settings.sip.regularization.first_positive
-            ? settings.sip.regularization.first_positive
-            : std::min(primal_regularization *
-                           settings.sip.regularization.increase_factor,
-                       settings.sip.regularization.maximum);
-    if (next_regularization <= primal_regularization) {
-      break;
-    }
-    primal_regularization = next_regularization;
-  }
-  if (!factorization_ok) {
-    return false;
-  }
-
-  for (int variable = 0; variable < x_dim; ++variable) {
-    rhs_x[variable] += primal_regularization * variables.x[variable];
-  }
-  callback_provider.solve(rhs, solution);
-  std::copy_n(solution, x_dim, variables.x);
-  std::copy_n(solution + x_dim, y_dim, variables.y);
-  std::copy_n(solution + x_dim + y_dim, s_dim, variables.z);
-
-  side = 0;
-  for (int variable = 0; variable < x_dim; ++variable) {
-    if (std::isfinite(workspace.scaled_lower_bounds[variable])) {
-      constexpr double jacobian = -1.0;
-      variables.bound_z[side] = (jacobian * variables.x[variable] -
-                                 workspace.sip.nrhs.bound_z[side]) /
-                                (1.0 + dual_regularization);
-      ++side;
-    }
-    if (std::isfinite(workspace.scaled_upper_bounds[variable])) {
-      constexpr double jacobian = 1.0;
-      variables.bound_z[side] = (jacobian * variables.x[variable] -
-                                 workspace.sip.nrhs.bound_z[side]) /
-                                (1.0 + dual_regularization);
-      ++side;
-    }
-  }
-
-  const int num_bound_sides = side;
-  double slack_shift = 0.0;
-  double dual_shift = 0.0;
-  const auto update_shifts = [&](double *slack, const double *dual,
-                                 const int size) {
-    for (int index = 0; index < size; ++index) {
-      slack[index] = -dual[index];
-      slack_shift = std::max(slack_shift, -slack[index]);
-      dual_shift = std::max(dual_shift, -dual[index]);
-    }
-  };
-  update_shifts(variables.s, variables.z, s_dim);
-  update_shifts(variables.bound_s, variables.bound_z, num_bound_sides);
-
-  double complementarity_sum = 0.0;
-  const auto accumulate_shifted_complementarity =
-      [&](const double *slack, const double *dual, const int size) {
-        for (int index = 0; index < size; ++index) {
-          complementarity_sum +=
-              (slack[index] + slack_shift) * (dual[index] + dual_shift);
-        }
-      };
-  accumulate_shifted_complementarity(variables.s, variables.z, s_dim);
-  accumulate_shifted_complementarity(variables.bound_s, variables.bound_z,
-                                     num_bound_sides);
-
-  const int complementarity_dim = s_dim + num_bound_sides;
-  const double target_complementarity =
-      complementarity_dim > 0
-          ? std::max(complementarity_sum / complementarity_dim, 1e-10)
-          : 0.0;
-  const auto make_strictly_positive = [&](double *slack, double *dual,
-                                          const int size) {
-    for (int index = 0; index < size; ++index) {
-      const double difference = dual[index];
-      const double root =
-          std::hypot(difference, 2.0 * std::sqrt(target_complementarity));
-      dual[index] = difference >= 0.0
-                        ? 0.5 * (difference + root)
-                        : 2.0 * target_complementarity / (root - difference);
-      slack[index] = dual[index] - difference;
-    }
-  };
-  make_strictly_positive(variables.s, variables.z, s_dim);
-  make_strictly_positive(variables.bound_s, variables.bound_z, num_bound_sides);
-
-  evaluate_model(data, workspace, variables.x);
-  return true;
 }
 
 void recover_solution(const Data &data, Workspace &workspace) {
@@ -450,6 +311,7 @@ auto solve(const Input &input, const Settings &settings, Workspace &workspace)
   copy_model(data, workspace);
   compute_scaling(input, settings, workspace);
   apply_scaling(input, workspace);
+  initialize_variables(input, settings, workspace);
 
   const sip_qdldl::Settings qdldl_settings{
       .permute_kkt_system = true,
@@ -457,25 +319,6 @@ auto solve(const Input &input, const Settings &settings, Workspace &workspace)
   };
   sip_qdldl::CallbackProvider callback_provider(
       qdldl_settings, workspace.scaled_model, workspace.qdldl);
-
-  if (!initialize_variables(input, settings, workspace, callback_provider)) {
-    return Output{
-        .sip =
-            {
-                .exit_status = ::sip::Status::FACTORIZATION_FAILURE,
-                .num_iterations = 0,
-                .num_ls_iterations = 0,
-                .max_primal_violation =
-                    std::numeric_limits<double>::signaling_NaN(),
-                .max_dual_violation =
-                    std::numeric_limits<double>::signaling_NaN(),
-            },
-        .primal = workspace.primal_solution,
-        .equality_dual = workspace.equality_dual_solution,
-        .inequality_dual = workspace.inequality_dual_solution,
-        .variable_bound_dual = workspace.variable_bound_dual_solution,
-    };
-  }
 
   const auto factor = [&callback_provider](const double *w, const double *r1,
                                            const double *r2,
