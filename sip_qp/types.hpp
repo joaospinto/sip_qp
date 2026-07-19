@@ -43,6 +43,7 @@ struct ScalingSettings {
   double min_norm = 1e-4;
   double max_norm = 1e4;
   double convergence_tolerance = 1e-3;
+  bool scale_homogeneous_objective = true;
 };
 
 struct TerminationSettings {
@@ -79,6 +80,7 @@ struct Workspace {
   double *equality_scaling;
   double *inequality_scaling;
   double *variable_bound_scaling;
+  double *dual_residual_scaling;
   double *scaling_norms;
   double *scaled_lower_bounds;
   double *scaled_upper_bounds;
@@ -87,6 +89,7 @@ struct Workspace {
   double *equality_dual_solution;
   double *inequality_dual_solution;
   double *variable_bound_dual_solution;
+  double objective_scaling;
 
   void reserve(const Input &input, const Settings &settings);
   void free();

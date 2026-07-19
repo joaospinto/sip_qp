@@ -28,7 +28,7 @@ auto inequality_jacobian_nnz(const Data &data) -> int {
 auto local_num_doubles(const Data &data) -> int {
   const int kkt_dim = data.num_primal_variables() + data.num_equalities() +
                       data.num_inequalities();
-  return 3 * kkt_dim + 5 * data.num_primal_variables();
+  return 3 * kkt_dim + 6 * data.num_primal_variables();
 }
 
 auto assign_double_array(double *&target, const int size, unsigned char *memory,
@@ -141,6 +141,7 @@ void Workspace::reserve(const Input &input, const Settings &settings) {
   equality_scaling = new double[y_dim];
   inequality_scaling = new double[s_dim];
   variable_bound_scaling = new double[x_dim];
+  dual_residual_scaling = new double[x_dim];
   scaling_norms = new double[kkt_dim];
   scaled_lower_bounds = new double[x_dim];
   scaled_upper_bounds = new double[x_dim];
@@ -160,6 +161,7 @@ void Workspace::free() {
   delete[] equality_scaling;
   delete[] inequality_scaling;
   delete[] variable_bound_scaling;
+  delete[] dual_residual_scaling;
   delete[] scaling_norms;
   delete[] scaled_lower_bounds;
   delete[] scaled_upper_bounds;
@@ -183,6 +185,7 @@ auto Workspace::mem_assign(const Input &input, const Settings &settings,
   assign_double_array(equality_scaling, y_dim, memory, offset);
   assign_double_array(inequality_scaling, s_dim, memory, offset);
   assign_double_array(variable_bound_scaling, x_dim, memory, offset);
+  assign_double_array(dual_residual_scaling, x_dim, memory, offset);
   assign_double_array(scaling_norms, kkt_dim, memory, offset);
   assign_double_array(scaled_lower_bounds, x_dim, memory, offset);
   assign_double_array(scaled_upper_bounds, x_dim, memory, offset);

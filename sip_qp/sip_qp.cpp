@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 
 namespace sip::qp {
 namespace {
@@ -18,6 +19,13 @@ void add_compensated(const double term, double &sum, double &correction) {
 
 auto matrix_nnz(const sip_qdldl::ConstSparseMatrix &matrix) -> int {
   return matrix.indptr[matrix.cols];
+}
+
+auto positive_mean_relative_error_bound(const int num_terms) -> double {
+  constexpr double unit_roundoff = std::numeric_limits<double>::epsilon() / 2.0;
+  const double accumulated_roundoff =
+      static_cast<double>(num_terms) * unit_roundoff;
+  return accumulated_roundoff / (1.0 - accumulated_roundoff);
 }
 
 void copy_matrix(const sip_qdldl::ConstSparseMatrix &source,
@@ -66,6 +74,7 @@ void compute_scaling(const Input &input, const Settings &settings,
   std::fill_n(workspace.primal_scaling, x_dim, 1.0);
   std::fill_n(workspace.equality_scaling, y_dim, 1.0);
   std::fill_n(workspace.inequality_scaling, s_dim, 1.0);
+  workspace.objective_scaling = 1.0;
 
   for (int iteration = 0; iteration < settings.scaling.max_iterations;
        ++iteration) {
@@ -135,6 +144,52 @@ void compute_scaling(const Input &input, const Settings &settings,
       break;
     }
   }
+
+  if (!settings.scaling.scale_homogeneous_objective) {
+    return;
+  }
+
+  double linear_objective_norm = 0.0;
+  for (int variable = 0; variable < x_dim; ++variable) {
+    linear_objective_norm = std::max(
+        linear_objective_norm, std::abs(workspace.primal_scaling[variable] *
+                                        data.linear_objective[variable]));
+  }
+  if (!std::isfinite(linear_objective_norm) || linear_objective_norm > 0.0) {
+    return;
+  }
+
+  std::fill_n(workspace.scaling_norms, x_dim, 0.0);
+  const auto &hessian = data.upper_hessian;
+  for (int column = 0; column < x_dim; ++column) {
+    for (int index = hessian.indptr[column]; index < hessian.indptr[column + 1];
+         ++index) {
+      const int row = hessian.ind[index];
+      update_symmetric_norm(workspace.scaling_norms, row, column,
+                            hessian.data[index] *
+                                workspace.primal_scaling[row] *
+                                workspace.primal_scaling[column]);
+    }
+  }
+
+  double hessian_norm = 0.0;
+  for (int variable = 0; variable < x_dim; ++variable) {
+    hessian_norm +=
+        workspace.scaling_norms[variable] / static_cast<double>(x_dim);
+  }
+  if (!std::isfinite(hessian_norm) || hessian_norm <= 0.0) {
+    return;
+  }
+
+  double objective_norm = hessian_norm;
+  objective_norm = objective_norm < settings.scaling.min_norm
+                       ? 1.0
+                       : std::min(objective_norm, settings.scaling.max_norm);
+  if (std::abs(objective_norm - 1.0) <=
+      positive_mean_relative_error_bound(x_dim)) {
+    objective_norm = 1.0;
+  }
+  workspace.objective_scaling = 1.0 / objective_norm;
 }
 
 void apply_scaling(const Input &input, Workspace &workspace) {
@@ -143,22 +198,26 @@ void apply_scaling(const Input &input, Workspace &workspace) {
   const int x_dim = data.num_primal_variables();
   const int y_dim = data.num_equalities();
   const int s_dim = data.num_inequalities();
+  const double objective_scaling = workspace.objective_scaling;
 
   for (int variable = 0; variable < x_dim; ++variable) {
     const double scaling = workspace.primal_scaling[variable];
     workspace.variable_bound_scaling[variable] = 1.0 / scaling;
+    workspace.dual_residual_scaling[variable] = objective_scaling * scaling;
     workspace.scaled_lower_bounds[variable] =
         data.lower_bounds[variable] / scaling;
     workspace.scaled_upper_bounds[variable] =
         data.upper_bounds[variable] / scaling;
-    workspace.scaled_linear_objective[variable] *= scaling;
+    workspace.scaled_linear_objective[variable] *= objective_scaling * scaling;
   }
 
+  model.f *= objective_scaling;
   auto &hessian = model.upper_hessian_lagrangian;
   for (int column = 0; column < x_dim; ++column) {
     for (int index = hessian.indptr[column]; index < hessian.indptr[column + 1];
          ++index) {
-      hessian.data[index] *= workspace.primal_scaling[hessian.ind[index]] *
+      hessian.data[index] *= objective_scaling *
+                             workspace.primal_scaling[hessian.ind[index]] *
                              workspace.primal_scaling[column];
     }
   }
@@ -210,7 +269,7 @@ void evaluate_model(const Data &data, Workspace &workspace, const double *x) {
   sip_qdldl::add_Ax_to_y_where_A_upper_symmetric(model.upper_hessian_lagrangian,
                                                  x, model.gradient_f);
 
-  double objective = data.objective_constant;
+  double objective = workspace.objective_scaling * data.objective_constant;
   double correction = 0.0;
   for (int variable = 0; variable < x_dim; ++variable) {
     add_compensated(0.5 * x[variable] *
@@ -226,9 +285,92 @@ void evaluate_model(const Data &data, Workspace &workspace, const double *x) {
                        workspace.inequality_scaling, x, model.g);
 }
 
+struct GapMetrics {
+  double absolute_gap;
+  double scale;
+};
+
+void recover_solution(const Data &data, Workspace &workspace);
+
+auto original_coordinate_gap(const Data &data, const Workspace &workspace)
+    -> GapMetrics {
+  const int x_dim = data.num_primal_variables();
+  const int y_dim = data.num_equalities();
+  const int s_dim = data.num_inequalities();
+  double hessian_term = 0.0;
+  double hessian_correction = 0.0;
+  double linear_term = 0.0;
+  double linear_correction = 0.0;
+  double equality_term = 0.0;
+  double equality_correction = 0.0;
+  double inequality_term = 0.0;
+  double inequality_correction = 0.0;
+  double bound_term = 0.0;
+  double bound_correction = 0.0;
+  double gap = 0.0;
+  double gap_correction = 0.0;
+  const auto accumulate = [&](const double term, double &component,
+                              double &component_correction) {
+    add_compensated(term, component, component_correction);
+    add_compensated(term, gap, gap_correction);
+  };
+
+  const auto &upper_hessian = data.upper_hessian;
+  for (int column = 0; column < x_dim; ++column) {
+    const double column_primal = workspace.primal_solution[column];
+    accumulate(data.linear_objective[column] * column_primal, linear_term,
+               linear_correction);
+    for (int index = upper_hessian.indptr[column];
+         index < upper_hessian.indptr[column + 1]; ++index) {
+      const int row = upper_hessian.ind[index];
+      const double row_primal = workspace.primal_solution[row];
+      const double symmetry = row == column ? 1.0 : 2.0;
+      accumulate(symmetry * upper_hessian.data[index] * row_primal *
+                     column_primal,
+                 hessian_term, hessian_correction);
+    }
+  }
+
+  for (int index = 0; index < y_dim; ++index) {
+    accumulate(-data.equality_offsets[index] *
+                   workspace.equality_dual_solution[index],
+               equality_term, equality_correction);
+  }
+
+  for (int index = 0; index < s_dim; ++index) {
+    accumulate(-data.inequality_offsets[index] *
+                   workspace.inequality_dual_solution[index],
+               inequality_term, inequality_correction);
+  }
+
+  for (int variable = 0; variable < x_dim; ++variable) {
+    const double bound_dual = workspace.variable_bound_dual_solution[variable];
+    if (bound_dual < 0.0 && std::isfinite(data.lower_bounds[variable])) {
+      accumulate(data.lower_bounds[variable] * bound_dual, bound_term,
+                 bound_correction);
+    } else if (bound_dual > 0.0 && std::isfinite(data.upper_bounds[variable])) {
+      accumulate(data.upper_bounds[variable] * bound_dual, bound_term,
+                 bound_correction);
+    }
+  }
+
+  hessian_term += hessian_correction;
+  linear_term += linear_correction;
+  equality_term += equality_correction;
+  inequality_term += inequality_correction;
+  bound_term += bound_correction;
+
+  return {
+      .absolute_gap = std::abs(gap + gap_correction),
+      .scale = std::max({1.0, std::abs(hessian_term), std::abs(linear_term),
+                         std::abs(equality_term), std::abs(inequality_term),
+                         std::abs(bound_term)}),
+  };
+}
+
 auto optimality_satisfied(const ::sip::TerminationCallbackInput &iterate,
                           const Settings &settings, const Data &data,
-                          const Workspace &workspace) -> bool {
+                          Workspace &workspace) -> bool {
   const int x_dim = data.num_primal_variables();
   const int y_dim = data.num_equalities();
   const int s_dim = data.num_inequalities();
@@ -277,7 +419,7 @@ auto optimality_satisfied(const ::sip::TerminationCallbackInput &iterate,
 
   double dual_scale = 0.0;
   for (int variable = 0; variable < x_dim; ++variable) {
-    const double scaling = workspace.primal_scaling[variable];
+    const double scaling = workspace.dual_residual_scaling[variable];
     const double linear_objective = workspace.scaled_linear_objective[variable];
     const double hessian_product =
         iterate.objective_gradient[variable] - linear_objective;
@@ -363,18 +505,34 @@ auto optimality_satisfied(const ::sip::TerminationCallbackInput &iterate,
 
   const double gap = hessian_term + linear_term - equality_term -
                      inequality_term - lower_bound_term - upper_bound_term;
-  const double gap_scale =
-      std::max({1.0, std::abs(hessian_term), std::abs(linear_term),
-                std::abs(equality_term), std::abs(inequality_term),
-                std::abs(lower_bound_term), std::abs(upper_bound_term)});
-  if (!std::isfinite(gap) || !std::isfinite(gap_scale)) {
+  const double scaled_gap_scale =
+      std::max({workspace.objective_scaling, std::abs(hessian_term),
+                std::abs(linear_term), std::abs(equality_term),
+                std::abs(inequality_term), std::abs(lower_bound_term),
+                std::abs(upper_bound_term)});
+  if (!std::isfinite(gap) || !std::isfinite(scaled_gap_scale)) {
     return false;
   }
 
-  const double absolute_gap = std::abs(gap);
-  const double relative_gap = absolute_gap / gap_scale;
-  return absolute_gap < settings.termination.max_absolute_duality_gap ||
-         relative_gap < settings.termination.max_relative_duality_gap;
+  const double absolute_gap = std::abs(gap) / workspace.objective_scaling;
+  const double relative_gap = std::abs(gap) / scaled_gap_scale;
+  const bool fast_gap_satisfied =
+      absolute_gap < settings.termination.max_absolute_duality_gap ||
+      relative_gap < settings.termination.max_relative_duality_gap;
+  if (!fast_gap_satisfied) {
+    return false;
+  }
+
+  recover_solution(data, workspace);
+  const GapMetrics original_gap = original_coordinate_gap(data, workspace);
+  if (!std::isfinite(original_gap.absolute_gap) ||
+      !std::isfinite(original_gap.scale)) {
+    return false;
+  }
+  return original_gap.absolute_gap <
+             settings.termination.max_absolute_duality_gap ||
+         original_gap.absolute_gap / original_gap.scale <
+             settings.termination.max_relative_duality_gap;
 }
 
 void initialize_variables(const Input &input, const Settings &settings,
@@ -393,8 +551,9 @@ void initialize_variables(const Input &input, const Settings &settings,
 
   evaluate_model(data, workspace, variables.x);
 
-  const double initial_mu = settings.sip.barrier.initial_mu;
-  const double slack_floor = std::max(initial_mu, 1e-8);
+  const double initial_mu =
+      workspace.objective_scaling * settings.sip.barrier.initial_mu;
+  const double slack_floor = std::max(settings.sip.barrier.initial_mu, 1e-8);
   for (int inequality = 0; inequality < s_dim; ++inequality) {
     variables.s[inequality] =
         std::max(-workspace.scaled_model.g[inequality], slack_floor);
@@ -428,11 +587,14 @@ void recover_solution(const Data &data, Workspace &workspace) {
   for (int equality = 0; equality < data.num_equalities(); ++equality) {
     workspace.equality_dual_solution[equality] =
         workspace.equality_scaling[equality] * workspace.sip.vars.y[equality];
+    workspace.equality_dual_solution[equality] /= workspace.objective_scaling;
   }
   for (int inequality = 0; inequality < data.num_inequalities(); ++inequality) {
     workspace.inequality_dual_solution[inequality] =
         workspace.inequality_scaling[inequality] *
         workspace.sip.vars.z[inequality];
+    workspace.inequality_dual_solution[inequality] /=
+        workspace.objective_scaling;
   }
 
   int side = 0;
@@ -448,7 +610,8 @@ void recover_solution(const Data &data, Workspace &workspace) {
               workspace.sip.vars.bound_z[side];
       ++side;
     }
-    workspace.variable_bound_dual_solution[variable] = dual;
+    workspace.variable_bound_dual_solution[variable] =
+        dual / workspace.objective_scaling;
   }
 }
 
@@ -549,7 +712,7 @@ auto solve(const Input &input, const Settings &settings, Workspace &workspace)
       .upper_bounds = workspace.scaled_upper_bounds,
       .residual_scaling =
           {
-              .dual = workspace.primal_scaling,
+              .dual = workspace.dual_residual_scaling,
               .equality = workspace.equality_scaling,
               .inequality = workspace.inequality_scaling,
               .variable_bound = workspace.variable_bound_scaling,
@@ -563,13 +726,21 @@ auto solve(const Input &input, const Settings &settings, Workspace &workspace)
   };
 
   ::sip::Settings sip_settings = settings.sip;
+  sip_settings.barrier.initial_mu *= workspace.objective_scaling;
+  sip_settings.penalty.initial_penalty_parameter *= workspace.objective_scaling;
+  sip_settings.penalty.max_penalty_parameter *= workspace.objective_scaling;
+  sip_settings.line_search.min_merit_slope_to_skip_line_search *=
+      workspace.objective_scaling;
   sip_settings.termination.max_constraint_violation =
       settings.termination.max_absolute_residual;
   sip_settings.termination.max_dual_residual =
       settings.termination.max_absolute_residual;
   sip_settings.termination.max_complementarity_gap =
+      workspace.objective_scaling *
       std::min(sip_settings.termination.max_complementarity_gap,
                settings.termination.max_absolute_duality_gap);
+  sip_settings.barrier.mu_min *= workspace.objective_scaling;
+  sip_settings.termination.max_merit_slope *= workspace.objective_scaling;
   const ::sip::Output sip_output =
       ::sip::solve(sip_input, sip_settings, workspace.sip);
   recover_solution(data, workspace);

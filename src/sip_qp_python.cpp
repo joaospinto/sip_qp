@@ -363,7 +363,9 @@ NB_MODULE(sip_qp_python_ext, module) {
       .def_rw("min_norm", &sip::qp::ScalingSettings::min_norm)
       .def_rw("max_norm", &sip::qp::ScalingSettings::max_norm)
       .def_rw("convergence_tolerance",
-              &sip::qp::ScalingSettings::convergence_tolerance);
+              &sip::qp::ScalingSettings::convergence_tolerance)
+      .def_rw("scale_homogeneous_objective",
+              &sip::qp::ScalingSettings::scale_homogeneous_objective);
 
   nb::class_<sip::qp::TerminationSettings>(module, "TerminationSettings")
       .def(nb::init<>())

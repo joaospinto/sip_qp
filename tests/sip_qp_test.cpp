@@ -83,6 +83,7 @@ TEST(SipQpTest, SolvesWithReservedWorkspace) {
 
   expect_equality_constrained_solution(
       solve(problem.input, settings, workspace));
+  EXPECT_DOUBLE_EQ(workspace.objective_scaling, 1.0);
 
   workspace.free();
 }
@@ -120,6 +121,71 @@ TEST(SipQpTest, SolvesWithAssignedWorkspace) {
 
   expect_equality_constrained_solution(output);
   EXPECT_EQ(num_allocations, 0);
+}
+
+TEST(SipQpTest, ObjectiveScalingPreservesOriginalCoordinates) {
+  EqualityConstrainedQp problem;
+  problem.hessian_data = {0.04, 0.01, 0.02};
+  problem.linear_objective = {0.0, 0.0};
+  Settings settings = default_settings();
+  settings.scaling.scale_homogeneous_objective = true;
+
+  Workspace workspace;
+  workspace.reserve(problem.input, settings);
+  const Output base_output = solve(problem.input, settings, workspace);
+  const std::array<double, 2> base_primal{base_output.primal[0],
+                                          base_output.primal[1]};
+  const double base_equality_dual = base_output.equality_dual[0];
+  const double base_bound_dual = base_output.variable_bound_dual[1];
+  const double base_objective_scaling = workspace.objective_scaling;
+  const ::sip::Status base_status = base_output.sip.exit_status;
+  workspace.free();
+
+  constexpr double objective_multiplier = 1e6;
+  for (double &entry : problem.hessian_data) {
+    entry *= objective_multiplier;
+  }
+  workspace.reserve(problem.input, settings);
+  const Output scaled_output = solve(problem.input, settings, workspace);
+
+  EXPECT_EQ(base_status, ::sip::Status::SOLVED);
+  EXPECT_EQ(scaled_output.sip.exit_status, ::sip::Status::SOLVED);
+  EXPECT_NE(base_objective_scaling, 1.0);
+  EXPECT_TRUE(std::isfinite(base_objective_scaling));
+  EXPECT_TRUE(std::isfinite(workspace.objective_scaling));
+  EXPECT_NEAR(scaled_output.primal[0], base_primal[0], 2e-7);
+  EXPECT_NEAR(scaled_output.primal[1], base_primal[1], 2e-7);
+  EXPECT_NEAR(scaled_output.equality_dual[0],
+              objective_multiplier * base_equality_dual,
+              1e-6 * std::abs(objective_multiplier * base_equality_dual));
+  EXPECT_NEAR(scaled_output.variable_bound_dual[1],
+              objective_multiplier * base_bound_dual,
+              3e-6 * std::abs(objective_multiplier * base_bound_dual));
+
+  workspace.free();
+}
+
+TEST(SipQpTest, ObjectiveScalingRemainsFiniteAtExtremeMagnitudes) {
+  EqualityConstrainedQp problem;
+  problem.hessian_data = {1e300, 2e299, 5e299};
+  problem.linear_objective = {0.0, 0.0};
+  problem.timeout = [] { return true; };
+  const Settings settings = default_settings();
+
+  Workspace workspace;
+  workspace.reserve(problem.input, settings);
+  solve(problem.input, settings, workspace);
+
+  EXPECT_TRUE(std::isfinite(workspace.objective_scaling));
+  EXPECT_GE(workspace.objective_scaling, 1.0 / settings.scaling.max_norm);
+  EXPECT_LE(workspace.objective_scaling, 1.0 / settings.scaling.min_norm);
+  const auto &scaled_hessian = workspace.scaled_model.upper_hessian_lagrangian;
+  for (int index = 0; index < scaled_hessian.indptr[scaled_hessian.cols];
+       ++index) {
+    EXPECT_TRUE(std::isfinite(scaled_hessian.data[index]));
+  }
+
+  workspace.free();
 }
 
 TEST(SipQpTest, EquilibratesLargeConstraintCoefficients) {
