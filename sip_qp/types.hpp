@@ -89,6 +89,9 @@ struct Workspace {
   double *equality_dual_solution;
   double *inequality_dual_solution;
   double *variable_bound_dual_solution;
+  double *original_coordinate_hessian_product;
+  double *original_coordinate_stationarity_residual;
+  double *original_coordinate_sum_correction;
   double objective_scaling;
 
   void reserve(const Input &input, const Settings &settings);

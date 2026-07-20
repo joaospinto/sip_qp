@@ -17,6 +17,17 @@ void add_compensated(const double term, double &sum, double &correction) {
   sum = next;
 }
 
+class CompensatedSum {
+public:
+  void add(const double value) { add_compensated(value, sum_, correction_); }
+
+  auto value() const -> double { return sum_ + correction_; }
+
+private:
+  double sum_ = 0.0;
+  double correction_ = 0.0;
+};
+
 auto matrix_nnz(const sip_qdldl::ConstSparseMatrix &matrix) -> int {
   return matrix.indptr[matrix.cols];
 }
@@ -290,81 +301,237 @@ struct GapMetrics {
   double scale;
 };
 
+struct ResidualMetrics {
+  double max_primal_violation;
+  double primal_scale;
+  double max_stationarity_residual;
+  double stationarity_scale;
+  CompensatedSum hessian_gap;
+};
+
 void recover_solution(const Data &data, Workspace &workspace);
 
-auto original_coordinate_gap(const Data &data, const Workspace &workspace)
-    -> GapMetrics {
+auto original_coordinate_gap(const Data &data, const Workspace &workspace,
+                             const CompensatedSum &hessian_term) -> GapMetrics {
   const int x_dim = data.num_primal_variables();
   const int y_dim = data.num_equalities();
   const int s_dim = data.num_inequalities();
-  double hessian_term = 0.0;
-  double hessian_correction = 0.0;
-  double linear_term = 0.0;
-  double linear_correction = 0.0;
-  double equality_term = 0.0;
-  double equality_correction = 0.0;
-  double inequality_term = 0.0;
-  double inequality_correction = 0.0;
-  double bound_term = 0.0;
-  double bound_correction = 0.0;
-  double gap = 0.0;
-  double gap_correction = 0.0;
-  const auto accumulate = [&](const double term, double &component,
-                              double &component_correction) {
-    add_compensated(term, component, component_correction);
-    add_compensated(term, gap, gap_correction);
+  CompensatedSum linear_term;
+  CompensatedSum equality_term;
+  CompensatedSum inequality_term;
+  CompensatedSum lower_bound_term;
+  CompensatedSum upper_bound_term;
+  CompensatedSum common_gap = hessian_term;
+  const auto accumulate_common = [&](const double term,
+                                     CompensatedSum &component) {
+    component.add(term);
+    common_gap.add(term);
   };
 
-  const auto &upper_hessian = data.upper_hessian;
-  for (int column = 0; column < x_dim; ++column) {
-    const double column_primal = workspace.primal_solution[column];
-    accumulate(data.linear_objective[column] * column_primal, linear_term,
-               linear_correction);
-    for (int index = upper_hessian.indptr[column];
-         index < upper_hessian.indptr[column + 1]; ++index) {
-      const int row = upper_hessian.ind[index];
-      const double row_primal = workspace.primal_solution[row];
-      const double symmetry = row == column ? 1.0 : 2.0;
-      accumulate(symmetry * upper_hessian.data[index] * row_primal *
-                     column_primal,
-                 hessian_term, hessian_correction);
-    }
+  for (int variable = 0; variable < x_dim; ++variable) {
+    const double primal = workspace.primal_solution[variable];
+    accumulate_common(data.linear_objective[variable] * primal, linear_term);
   }
 
   for (int index = 0; index < y_dim; ++index) {
-    accumulate(-data.equality_offsets[index] *
-                   workspace.equality_dual_solution[index],
-               equality_term, equality_correction);
+    accumulate_common(-data.equality_offsets[index] *
+                          workspace.equality_dual_solution[index],
+                      equality_term);
   }
 
   for (int index = 0; index < s_dim; ++index) {
-    accumulate(-data.inequality_offsets[index] *
-                   workspace.inequality_dual_solution[index],
-               inequality_term, inequality_correction);
+    accumulate_common(-data.inequality_offsets[index] *
+                          workspace.inequality_dual_solution[index],
+                      inequality_term);
   }
 
+  CompensatedSum gap = common_gap;
   for (int variable = 0; variable < x_dim; ++variable) {
-    const double bound_dual = workspace.variable_bound_dual_solution[variable];
-    if (bound_dual < 0.0 && std::isfinite(data.lower_bounds[variable])) {
-      accumulate(data.lower_bounds[variable] * bound_dual, bound_term,
-                 bound_correction);
-    } else if (bound_dual > 0.0 && std::isfinite(data.upper_bounds[variable])) {
-      accumulate(data.upper_bounds[variable] * bound_dual, bound_term,
-                 bound_correction);
+    const double dual = workspace.variable_bound_dual_solution[variable];
+    if (dual < 0.0 && std::isfinite(data.lower_bounds[variable])) {
+      const double term = data.lower_bounds[variable] * dual;
+      lower_bound_term.add(term);
+      gap.add(term);
+    } else if (dual > 0.0 && std::isfinite(data.upper_bounds[variable])) {
+      const double term = data.upper_bounds[variable] * dual;
+      upper_bound_term.add(term);
+      gap.add(term);
     }
   }
 
-  hessian_term += hessian_correction;
-  linear_term += linear_correction;
-  equality_term += equality_correction;
-  inequality_term += inequality_correction;
-  bound_term += bound_correction;
-
   return {
-      .absolute_gap = std::abs(gap + gap_correction),
-      .scale = std::max({1.0, std::abs(hessian_term), std::abs(linear_term),
-                         std::abs(equality_term), std::abs(inequality_term),
-                         std::abs(bound_term)}),
+      .absolute_gap = std::abs(gap.value()),
+      .scale = std::max(
+          {1.0, std::abs(hessian_term.value()), std::abs(linear_term.value()),
+           std::abs(equality_term.value()), std::abs(inequality_term.value()),
+           std::abs(lower_bound_term.value()),
+           std::abs(upper_bound_term.value())}),
+  };
+}
+
+auto gap_satisfied(const GapMetrics &gap, const TerminationSettings &settings)
+    -> bool {
+  return std::isfinite(gap.absolute_gap) && std::isfinite(gap.scale) &&
+         (gap.absolute_gap < settings.max_absolute_duality_gap ||
+          gap.absolute_gap / gap.scale < settings.max_relative_duality_gap);
+}
+
+auto original_coordinate_residuals(const Data &data, Workspace &workspace)
+    -> ResidualMetrics {
+  const int x_dim = data.num_primal_variables();
+  const int y_dim = data.num_equalities();
+  const int s_dim = data.num_inequalities();
+  const double *primal = workspace.primal_solution;
+  double max_primal_violation = 0.0;
+  double primal_scale = 0.0;
+  bool all_finite = true;
+  CompensatedSum hessian_gap;
+
+  const auto evaluate_affine_residual =
+      [&](const sip_qdldl::ConstSparseMatrix &transposed_jacobian,
+          const double *offsets, const int row, const bool equality) {
+        double affine_term = 0.0;
+        double affine_correction = 0.0;
+        for (int index = transposed_jacobian.indptr[row];
+             index < transposed_jacobian.indptr[row + 1]; ++index) {
+          add_compensated(transposed_jacobian.data[index] *
+                              primal[transposed_jacobian.ind[index]],
+                          affine_term, affine_correction);
+        }
+        affine_term += affine_correction;
+
+        double residual = offsets[row];
+        double residual_correction = 0.0;
+        add_compensated(affine_term, residual, residual_correction);
+        residual += residual_correction;
+        all_finite = all_finite && std::isfinite(affine_term) &&
+                     std::isfinite(residual) && std::isfinite(offsets[row]);
+        const double violation =
+            equality ? std::abs(residual) : std::max(residual, 0.0);
+        max_primal_violation = std::max(max_primal_violation, violation);
+        primal_scale = std::max(
+            {primal_scale, std::abs(affine_term), std::abs(offsets[row])});
+      };
+
+  for (int equality = 0; equality < y_dim; ++equality) {
+    evaluate_affine_residual(data.transposed_equality_jacobian,
+                             data.equality_offsets, equality, true);
+  }
+  for (int inequality = 0; inequality < s_dim; ++inequality) {
+    evaluate_affine_residual(data.transposed_inequality_jacobian,
+                             data.inequality_offsets, inequality, false);
+  }
+
+  for (int variable = 0; variable < x_dim; ++variable) {
+    all_finite = all_finite && std::isfinite(primal[variable]);
+    if (std::isfinite(data.lower_bounds[variable])) {
+      max_primal_violation = std::max(
+          max_primal_violation,
+          std::max(data.lower_bounds[variable] - primal[variable], 0.0));
+      primal_scale =
+          std::max({primal_scale, std::abs(data.lower_bounds[variable]),
+                    std::abs(primal[variable])});
+    }
+    if (std::isfinite(data.upper_bounds[variable])) {
+      max_primal_violation = std::max(
+          max_primal_violation,
+          std::max(primal[variable] - data.upper_bounds[variable], 0.0));
+      primal_scale =
+          std::max({primal_scale, std::abs(data.upper_bounds[variable]),
+                    std::abs(primal[variable])});
+    }
+  }
+
+  std::fill_n(workspace.original_coordinate_hessian_product, x_dim, 0.0);
+  std::fill_n(workspace.original_coordinate_sum_correction, x_dim, 0.0);
+  const auto &upper_hessian = data.upper_hessian;
+  for (int column = 0; column < x_dim; ++column) {
+    for (int index = upper_hessian.indptr[column];
+         index < upper_hessian.indptr[column + 1]; ++index) {
+      const int row = upper_hessian.ind[index];
+      const double value = upper_hessian.data[index];
+      const double gap_term = value * primal[row] * primal[column];
+      hessian_gap.add(gap_term);
+      add_compensated(value * primal[column],
+                      workspace.original_coordinate_hessian_product[row],
+                      workspace.original_coordinate_sum_correction[row]);
+      if (row != column) {
+        hessian_gap.add(gap_term);
+        add_compensated(value * primal[row],
+                        workspace.original_coordinate_hessian_product[column],
+                        workspace.original_coordinate_sum_correction[column]);
+      }
+    }
+  }
+  for (int variable = 0; variable < x_dim; ++variable) {
+    workspace.original_coordinate_hessian_product[variable] +=
+        workspace.original_coordinate_sum_correction[variable];
+  }
+
+  std::copy_n(workspace.variable_bound_dual_solution, x_dim,
+              workspace.original_coordinate_stationarity_residual);
+  std::fill_n(workspace.original_coordinate_sum_correction, x_dim, 0.0);
+  const auto add_transposed_product =
+      [&](const sip_qdldl::ConstSparseMatrix &transposed_jacobian,
+          const double *dual, const int num_rows) {
+        for (int row = 0; row < num_rows; ++row) {
+          for (int index = transposed_jacobian.indptr[row];
+               index < transposed_jacobian.indptr[row + 1]; ++index) {
+            const int variable = transposed_jacobian.ind[index];
+            add_compensated(
+                transposed_jacobian.data[index] * dual[row],
+                workspace.original_coordinate_stationarity_residual[variable],
+                workspace.original_coordinate_sum_correction[variable]);
+          }
+        }
+      };
+  add_transposed_product(data.transposed_equality_jacobian,
+                         workspace.equality_dual_solution, y_dim);
+  add_transposed_product(data.transposed_inequality_jacobian,
+                         workspace.inequality_dual_solution, s_dim);
+
+  double max_stationarity_residual = 0.0;
+  double stationarity_scale = 0.0;
+  for (int variable = 0; variable < x_dim; ++variable) {
+    double constraint_dual =
+        workspace.original_coordinate_stationarity_residual[variable];
+    constraint_dual += workspace.original_coordinate_sum_correction[variable];
+    double residual = data.linear_objective[variable];
+    double correction = 0.0;
+    add_compensated(workspace.original_coordinate_hessian_product[variable],
+                    residual, correction);
+    add_compensated(constraint_dual, residual, correction);
+    residual += correction;
+    workspace.original_coordinate_stationarity_residual[variable] = residual;
+    all_finite = all_finite && std::isfinite(constraint_dual) &&
+                 std::isfinite(
+                     workspace.original_coordinate_hessian_product[variable]) &&
+                 std::isfinite(data.linear_objective[variable]) &&
+                 std::isfinite(residual);
+    max_stationarity_residual =
+        std::max(max_stationarity_residual, std::abs(residual));
+    stationarity_scale = std::max(
+        {stationarity_scale, std::abs(data.linear_objective[variable]),
+         std::abs(workspace.original_coordinate_hessian_product[variable]),
+         std::abs(constraint_dual)});
+  }
+
+  if (!all_finite) {
+    const double infinity = std::numeric_limits<double>::infinity();
+    return {
+        .max_primal_violation = infinity,
+        .primal_scale = infinity,
+        .max_stationarity_residual = infinity,
+        .stationarity_scale = infinity,
+        .hessian_gap = hessian_gap,
+    };
+  }
+  return {
+      .max_primal_violation = max_primal_violation,
+      .primal_scale = std::max(1.0, primal_scale),
+      .max_stationarity_residual = max_stationarity_residual,
+      .stationarity_scale = std::max(1.0, stationarity_scale),
+      .hessian_gap = hessian_gap,
   };
 }
 
@@ -524,15 +691,27 @@ auto optimality_satisfied(const ::sip::TerminationCallbackInput &iterate,
   }
 
   recover_solution(data, workspace);
-  const GapMetrics original_gap = original_coordinate_gap(data, workspace);
-  if (!std::isfinite(original_gap.absolute_gap) ||
-      !std::isfinite(original_gap.scale)) {
+  const ResidualMetrics original_residuals =
+      original_coordinate_residuals(data, workspace);
+  const bool original_primal_satisfied =
+      original_residuals.max_primal_violation <
+          settings.termination.max_absolute_residual ||
+      original_residuals.max_primal_violation /
+              original_residuals.primal_scale <
+          settings.termination.max_relative_residual;
+  const bool original_stationarity_satisfied =
+      original_residuals.max_stationarity_residual <
+          settings.termination.max_absolute_residual ||
+      original_residuals.max_stationarity_residual /
+              original_residuals.stationarity_scale <
+          settings.termination.max_relative_residual;
+  if (!original_primal_satisfied || !original_stationarity_satisfied) {
     return false;
   }
-  return original_gap.absolute_gap <
-             settings.termination.max_absolute_duality_gap ||
-         original_gap.absolute_gap / original_gap.scale <
-             settings.termination.max_relative_duality_gap;
+
+  return gap_satisfied(
+      original_coordinate_gap(data, workspace, original_residuals.hessian_gap),
+      settings.termination);
 }
 
 void initialize_variables(const Input &input, const Settings &settings,
@@ -600,18 +779,22 @@ void recover_solution(const Data &data, Workspace &workspace) {
   int side = 0;
   for (int variable = 0; variable < data.num_primal_variables(); ++variable) {
     double dual = 0.0;
+    double dual_correction = 0.0;
     if (std::isfinite(workspace.scaled_lower_bounds[variable])) {
-      dual -= workspace.variable_bound_scaling[variable] *
-              workspace.sip.vars.bound_z[side];
+      const double side_dual = workspace.variable_bound_scaling[variable] *
+                               workspace.sip.vars.bound_z[side] /
+                               workspace.objective_scaling;
+      add_compensated(-side_dual, dual, dual_correction);
       ++side;
     }
     if (std::isfinite(workspace.scaled_upper_bounds[variable])) {
-      dual += workspace.variable_bound_scaling[variable] *
-              workspace.sip.vars.bound_z[side];
+      const double side_dual = workspace.variable_bound_scaling[variable] *
+                               workspace.sip.vars.bound_z[side] /
+                               workspace.objective_scaling;
+      add_compensated(side_dual, dual, dual_correction);
       ++side;
     }
-    workspace.variable_bound_dual_solution[variable] =
-        dual / workspace.objective_scaling;
+    workspace.variable_bound_dual_solution[variable] = dual + dual_correction;
   }
 }
 

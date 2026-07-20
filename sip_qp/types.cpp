@@ -28,7 +28,7 @@ auto inequality_jacobian_nnz(const Data &data) -> int {
 auto local_num_doubles(const Data &data) -> int {
   const int kkt_dim = data.num_primal_variables() + data.num_equalities() +
                       data.num_inequalities();
-  return 3 * kkt_dim + 6 * data.num_primal_variables();
+  return 3 * kkt_dim + 9 * data.num_primal_variables();
 }
 
 auto assign_double_array(double *&target, const int size, unsigned char *memory,
@@ -150,6 +150,9 @@ void Workspace::reserve(const Input &input, const Settings &settings) {
   equality_dual_solution = new double[y_dim];
   inequality_dual_solution = new double[s_dim];
   variable_bound_dual_solution = new double[x_dim];
+  original_coordinate_hessian_product = new double[x_dim];
+  original_coordinate_stationarity_residual = new double[x_dim];
+  original_coordinate_sum_correction = new double[x_dim];
 }
 
 void Workspace::free() {
@@ -170,6 +173,9 @@ void Workspace::free() {
   delete[] equality_dual_solution;
   delete[] inequality_dual_solution;
   delete[] variable_bound_dual_solution;
+  delete[] original_coordinate_hessian_product;
+  delete[] original_coordinate_stationarity_residual;
+  delete[] original_coordinate_sum_correction;
 }
 
 auto Workspace::mem_assign(const Input &input, const Settings &settings,
@@ -194,6 +200,12 @@ auto Workspace::mem_assign(const Input &input, const Settings &settings,
   assign_double_array(equality_dual_solution, y_dim, memory, offset);
   assign_double_array(inequality_dual_solution, s_dim, memory, offset);
   assign_double_array(variable_bound_dual_solution, x_dim, memory, offset);
+  assign_double_array(original_coordinate_hessian_product, x_dim, memory,
+                      offset);
+  assign_double_array(original_coordinate_stationarity_residual, x_dim, memory,
+                      offset);
+  assign_double_array(original_coordinate_sum_correction, x_dim, memory,
+                      offset);
 
   offset = align_offset(offset);
   offset += scaled_model.mem_assign(
