@@ -128,6 +128,14 @@ void compute_scaling(const Input &input, const Settings &settings,
       }
     }
 
+    for (int variable = 0; variable < x_dim; ++variable) {
+      if (std::isfinite(data.lower_bounds[variable]) ||
+          std::isfinite(data.upper_bounds[variable])) {
+        workspace.scaling_norms[variable] =
+            std::max(workspace.scaling_norms[variable], 1.0);
+      }
+    }
+
     double max_change = 0.0;
     for (int index = 0; index < kkt_dim; ++index) {
       double norm = workspace.scaling_norms[index];

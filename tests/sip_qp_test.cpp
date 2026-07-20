@@ -243,5 +243,21 @@ TEST(SipQpTest, EquilibratesLargeConstraintCoefficients) {
   ordering_workspace.free();
 }
 
+TEST(SipQpTest, IncludesVariableBoundRowsInScaling) {
+  EqualityConstrainedQp problem;
+  problem.hessian_data = {1e-3, 0.0, 1e-3};
+  problem.equality_data = {0.0, 0.0};
+  problem.timeout = [] { return true; };
+  const Settings settings = default_settings();
+  Workspace workspace;
+  workspace.reserve(problem.input, settings);
+
+  solve(problem.input, settings, workspace);
+
+  EXPECT_DOUBLE_EQ(workspace.primal_scaling[0], 1.0);
+  EXPECT_DOUBLE_EQ(workspace.primal_scaling[1], 1.0);
+  workspace.free();
+}
+
 } // namespace
 } // namespace sip::qp
