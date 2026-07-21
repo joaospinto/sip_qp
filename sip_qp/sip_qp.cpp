@@ -841,6 +841,8 @@ auto solve(const Input &input, const Settings &settings, Workspace &workspace)
   ::sip::Settings sip_settings = settings.sip;
   sip_settings.barrier.initial_mu *= workspace.objective_scaling;
   sip_settings.penalty.initial_penalty_parameter *= workspace.objective_scaling;
+  sip_settings.penalty.min_penalty_barrier_product *=
+      workspace.objective_scaling * workspace.objective_scaling;
   sip_settings.penalty.max_penalty_parameter *= workspace.objective_scaling;
   sip_settings.line_search.min_merit_slope_to_skip_line_search *=
       workspace.objective_scaling;

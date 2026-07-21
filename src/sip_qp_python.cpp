@@ -282,6 +282,8 @@ NB_MODULE(sip_qp_python_ext, module) {
       .def(nb::init<>())
       .def_rw("initial_penalty_parameter",
               &sip::PenaltySettings::initial_penalty_parameter)
+      .def_rw("min_penalty_barrier_product",
+              &sip::PenaltySettings::min_penalty_barrier_product)
       .def_rw("warm_start_penalties",
               &sip::PenaltySettings::warm_start_penalties)
       .def_rw("min_acceptable_constraint_violation_ratio",

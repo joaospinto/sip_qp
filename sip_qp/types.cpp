@@ -120,7 +120,10 @@ Settings::Settings()
                   .print_derivative_check_logs = false,
               },
       },
-      scaling{}, termination{} {}
+      scaling{}, termination{} {
+  sip.penalty.min_penalty_barrier_product =
+      sip.penalty.initial_penalty_parameter * sip.barrier.initial_mu;
+}
 
 auto default_settings() -> Settings { return Settings{}; }
 

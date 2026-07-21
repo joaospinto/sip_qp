@@ -129,6 +129,10 @@ TEST(SipQpTest, ObjectiveScalingPreservesOriginalCoordinates) {
   problem.linear_objective = {0.0, 0.0};
   Settings settings = default_settings();
   settings.scaling.scale_homogeneous_objective = true;
+  settings.termination.max_absolute_residual = 1e-10;
+  settings.termination.max_relative_residual = 0.0;
+  settings.termination.max_absolute_duality_gap = 1e-10;
+  settings.termination.max_relative_duality_gap = 0.0;
 
   Workspace workspace;
   workspace.reserve(problem.input, settings);
