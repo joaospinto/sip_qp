@@ -820,15 +820,18 @@ auto solve(const Input &input, const Settings &settings, Workspace &workspace)
       .get_g = std::cref(get_inequalities),
       .model_callback = std::cref(model_callback),
       .termination_callback = std::cref(termination_callback),
-      .timeout_callback = std::cref(input.timeout_callback),
+      .timeout_callback =
+          input.timeout_callback
+              ? ::sip::Input::TimeoutCallback(std::cref(input.timeout_callback))
+              : ::sip::Input::TimeoutCallback{},
       .lower_bounds = workspace.scaled_lower_bounds,
       .upper_bounds = workspace.scaled_upper_bounds,
-      .residual_scaling =
+      .scaling =
           {
-              .dual = workspace.dual_residual_scaling,
+              .objective = workspace.objective_scaling,
+              .variable = workspace.variable_bound_scaling,
               .equality = workspace.equality_scaling,
               .inequality = workspace.inequality_scaling,
-              .variable_bound = workspace.variable_bound_scaling,
           },
       .dimensions =
           {
